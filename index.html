@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FictionVerse BYOB</title>
+    <!-- JSZip is required by epub.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.1.5/jszip.min.js"></script>
+    <!-- The core epub.js library -->
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; display: flex; height: 100vh; background: #f9fafb; overflow: hidden; }
+        
+        .book-panel { flex: 1; display: flex; flex-direction: column; padding: 2rem; border-right: 1px solid #e5e7eb; background: white; min-width: 0; }
+        
+        .reader-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .upload-btn { background: #3b82f6; color: white; padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; font-weight: bold; border: none; }
+        .upload-btn:hover { background: #2563eb; }
+        #book-upload { display: none; }
+        .controls { display: none; gap: 1rem; }
+        .controls button { width: auto; padding: 0.5rem 1rem; background: #e5e7eb; color: #1f2937; border: none; border-radius: 0.5rem; cursor: pointer; }
+        .controls button:hover { background: #d1d5db; }
+        
+        #viewer { flex: 1; width: 100%; max-width: 800px; margin: 0 auto; overflow: hidden; background: #fff; position: relative; }
+
+        .chat-panel { width: 400px; display: flex; flex-direction: column; background: #f3f4f6; flex-shrink: 0; }
+        .chat-history { flex: 1; padding: 1.5rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; }
+        .message { padding: 1rem; border-radius: 0.5rem; max-width: 85%; line-height: 1.4; }
+        .user-msg { background: #3b82f6; color: white; align-self: flex-end; }
+        .ai-msg { background: white; color: #1f2937; align-self: flex-start; border: 1px solid #e5e7eb; }
+        .input-area { padding: 1.5rem; background: white; border-top: 1px solid #e5e7eb; }
+        input[type="text"] { width: 100%; padding: 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; box-sizing: border-box; margin-bottom: 0.5rem; }
+        .ask-btn { width: 100%; padding: 0.75rem; background: #111827; color: white; border: none; border-radius: 0.5rem; cursor: pointer; font-weight: bold; }
+        .ask-btn:hover { background: #374151; }
+    </style>
+</head>
+<body>
+
+    <div class="book-panel">
+        <div class="reader-header">
+            <h2>FictionVerse Reader</h2>
+            <div>
+                <label for="book-upload" class="upload-btn">Load EPUB</label>
+                <input type="file" id="book-upload" accept=".epub" />
+            </div>
+        </div>
+        
+        <p><strong>Current Status:</strong> <span id="current-status-display">Waiting for book...</span></p>
+        
+        <div class="controls" id="reader-controls">
+            <button onclick="rendition.prev()">← Previous Page</button>
+            <button onclick="rendition.next()">Next Page →</button>
+        </div>
+        <hr style="width: 100%; border: 0; border-top: 1px solid #e5e7eb; margin: 1rem 0;">
+        
+        <div id="viewer"></div>
+    </div>
+
+    <div class="chat-panel">
+        <div class="chat-history" id="chat-history">
+            <div class="message ai-msg">Hi! Load your book on the left, and ask me any questions you have as you read!</div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="question-input" placeholder="Ask a question about the story...">
+            <button class="ask-btn" onclick="askQuestion()">Ask AI</button>
+        </div>
+    </div>
+
+    <script>
+        let book = null;
+        let rendition = null;
+        let currentProgress = 0.0;
+        
+        // 1. Track the active book ID dynamically
+        let activeBookId = null; 
+
+        document.getElementById('book-upload').addEventListener('change', async function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            // --- A. Render the book locally immediately ---
+            if (window.FileReader) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const bookData = e.target.result;
+                    book = ePub(bookData);
+                    rendition = book.renderTo("viewer", { width: "100%", height: "100%", spread: "none" });
+                    rendition.display();
+                    
+                    book.ready.then(() => {
+                        document.getElementById("current-status-display").innerText = "Processing for AI...";
+                        return book.locations.generate(1600);
+                    }).then(() => {
+                        if (activeBookId) {
+                            document.getElementById("current-status-display").innerText = "Ready to read!";
+                        }
+                    });
+                    
+                    rendition.on("relocated", function(location) {
+                        if (book.locations.length() > 0) {
+                            let rawProgress = location.start.percentage;
+                            currentProgress = Math.max(0, rawProgress - 0.02); 
+                            let displayPercent = Math.round(rawProgress * 100);
+                            document.getElementById("current-status-display").innerText = `Read: ${displayPercent}%`;
+                        }
+                    });
+                    
+                    document.getElementById('reader-controls').style.display = 'flex';
+                };
+                reader.readAsArrayBuffer(file);
+            }
+
+            // --- B. Send to backend to chunk and embed in the background ---
+            const formData = new FormData();
+            formData.append("file", file);
+
+            const chatHistory = document.getElementById("chat-history");
+            chatHistory.innerHTML += `<div class="message ai-msg">Uploading your book to the AI brain... This might take 30-60 seconds depending on the book size.</div>`;
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            try {
+                const uploadResponse = await fetch("http://127.0.0.1:8000/upload", {
+                    method: "POST",
+                    body: formData
+                });
+                const uploadData = await uploadResponse.json();
+                
+                // Store the unique ID!
+                activeBookId = uploadData.book_id; 
+                
+                chatHistory.innerHTML += `<div class="message ai-msg" style="color: green;">Success! Embedded ${uploadData.message}. You can now ask questions!</div>`;
+                document.getElementById("current-status-display").innerText = "Ready to read!";
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            } catch (error) {
+                console.error(error);
+                chatHistory.innerHTML += `<div class="message ai-msg" style="color: red;">Error uploading book to AI.</div>`;
+            }
+        });
+
+        async function askQuestion() {
+            const input = document.getElementById("question-input");
+            const question = input.value;
+            if (!question) return;
+            
+            if (!activeBookId) {
+                alert("Please wait for the book to finish processing!");
+                return;
+            }
+
+            const chatHistory = document.getElementById("chat-history");
+            chatHistory.innerHTML += `<div class="message user-msg">${question}</div>`;
+            input.value = "";
+
+            try {
+                const response = await fetch("http://127.0.0.1:8000/ask", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        book_id: activeBookId, // 2. Passing the dynamic ID!
+                        current_progress: currentProgress, 
+                        question: question
+                    })
+                });
+
+                const data = await response.json();
+                console.log("🔍 DB SENT THESE CHUNKS TO THE AI:", data.retrieved_context);
+                
+                chatHistory.innerHTML += `<div class="message ai-msg">${data.answer}</div>`;
+            } catch (error) {
+                chatHistory.innerHTML += `<div class="message ai-msg" style="color: red;">Error connecting to API.</div>`;
+            }
+            
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
+    </script>
+</body>
+</html>
