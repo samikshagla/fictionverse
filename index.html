@@ -68,12 +68,12 @@
     </div>
 
     <script>
+        const API_BASE_URL = "https://fictionverse.onrender.com";
+
         let book = null;
         let rendition = null;
         let currentProgress = 0.0;
-        
-        // 1. Track the active book ID dynamically
-        let activeBookId = null; 
+        let activeBookId = null;
 
         document.getElementById('book-upload').addEventListener('change', async function(e) {
             const file = e.target.files[0];
@@ -100,6 +100,7 @@
                     rendition.on("relocated", function(location) {
                         if (book.locations.length() > 0) {
                             let rawProgress = location.start.percentage;
+                            // Pessimistic Buffer: stay 2% behind active reading position
                             currentProgress = Math.max(0, rawProgress - 0.02); 
                             let displayPercent = Math.round(rawProgress * 100);
                             document.getElementById("current-status-display").innerText = `Read: ${displayPercent}%`;
@@ -111,7 +112,7 @@
                 reader.readAsArrayBuffer(file);
             }
 
-            // --- B. Send to backend to chunk and embed in the background ---
+            // --- B. Send to live backend to chunk and embed ---
             const formData = new FormData();
             formData.append("file", file);
 
@@ -120,16 +121,15 @@
             chatHistory.scrollTop = chatHistory.scrollHeight;
 
             try {
-                const uploadResponse = await fetch("http://127.0.0.1:8000/upload", {
+                const uploadResponse = await fetch(`${API_BASE_URL}/upload`, {
                     method: "POST",
                     body: formData
                 });
                 const uploadData = await uploadResponse.json();
                 
-                // Store the unique ID!
-                activeBookId = uploadData.book_id; 
+                activeBookId = uploadData.book_id;
                 
-                chatHistory.innerHTML += `<div class="message ai-msg" style="color: green;">Success! Embedded ${uploadData.message}. You can now ask questions!</div>`;
+                chatHistory.innerHTML += `<div class="message ai-msg" style="color: green;">Success! ${uploadData.message} You can now ask questions!</div>`;
                 document.getElementById("current-status-display").innerText = "Ready to read!";
                 chatHistory.scrollTop = chatHistory.scrollHeight;
             } catch (error) {
@@ -153,11 +153,11 @@
             input.value = "";
 
             try {
-                const response = await fetch("http://127.0.0.1:8000/ask", {
+                const response = await fetch(`${API_BASE_URL}/ask`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
-                        book_id: activeBookId, // 2. Passing the dynamic ID!
+                        book_id: activeBookId,
                         current_progress: currentProgress, 
                         question: question
                     })
